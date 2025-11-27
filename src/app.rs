@@ -18,6 +18,7 @@ pub struct App {
     git: GitDiff,
     ui: Ui,
     needs_full_redraw: bool,
+    mouse_enabled: bool,
 }
 
 impl App {
@@ -34,6 +35,7 @@ impl App {
             git,
             ui,
             needs_full_redraw: true,
+            mouse_enabled: true,
         };
 
         if !app.files.is_empty() {
@@ -80,7 +82,7 @@ impl App {
         // Calculate scroll info for status bar
         let total = self.total_diff_lines();
         let visible = (self.ui.term_height - 3) as usize;
-        self.ui.draw_status_bar(stdout, self.scroll_offset, total, visible)?;
+        self.ui.draw_status_bar(stdout, self.scroll_offset, total, visible, self.mouse_enabled)?;
 
         stdout.flush()
     }
@@ -151,11 +153,32 @@ impl App {
                         KeyCode::Char('j') => self.scroll_down(),
                         KeyCode::PageUp => self.page_up(),
                         KeyCode::PageDown => self.page_down(),
+                        KeyCode::Char('m') => {
+                            self.mouse_enabled = !self.mouse_enabled;
+                            if self.mouse_enabled {
+                                execute!(stdout, EnableMouseCapture)?;
+                            } else {
+                                execute!(stdout, DisableMouseCapture)?;
+                            }
+                        }
                         _ => {}
                     },
-                    Event::Mouse(mouse) => match mouse.kind {
+                    Event::Mouse(mouse) if self.mouse_enabled => match mouse.kind {
                         MouseEventKind::ScrollUp => self.scroll_up(),
                         MouseEventKind::ScrollDown => self.scroll_down(),
+                        MouseEventKind::Down(_) => {
+                            // Click in file panel to select file
+                            if mouse.column < self.ui.left_panel_width 
+                                && mouse.row >= 1 
+                                && (mouse.row as usize) <= self.files.len() 
+                            {
+                                let clicked_file = (mouse.row - 1) as usize;
+                                if clicked_file != self.selected_file {
+                                    self.selected_file = clicked_file;
+                                    let _ = self.load_diff_for_selected();
+                                }
+                            }
+                        }
                         _ => {}
                     },
                     _ => {}

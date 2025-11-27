@@ -276,7 +276,7 @@ impl Ui {
         Ok(())
     }
 
-    pub fn draw_status_bar(&self, stdout: &mut io::Stdout, scroll_offset: usize, total_lines: usize, visible_lines: usize) -> io::Result<()> {
+    pub fn draw_status_bar(&self, stdout: &mut io::Stdout, scroll_offset: usize, total_lines: usize, visible_lines: usize, mouse_enabled: bool) -> io::Result<()> {
         execute!(stdout, MoveTo(0, self.term_height - 1))?;
         
         let scroll_info = if total_lines > visible_lines {
@@ -290,7 +290,8 @@ impl Ui {
             " All ".to_string()
         };
         
-        let controls = " ↑↓ Files │ j/k Scroll │ PgUp/PgDn Page │ q Quit ";
+        let mouse_status = if mouse_enabled { "m:Mouse" } else { "m:Select" };
+        let controls = format!(" ↑↓ Files │ j/k Scroll │ {} │ q Quit ", mouse_status);
         let right_padding = self.term_width as usize - controls.len() - scroll_info.len();
         let status = format!("{}{:>width$}{}", controls, "", scroll_info, width = right_padding);
         
