@@ -16,15 +16,44 @@ impl Highlighter {
         }
     }
 
+    /// Map unsupported extensions to similar supported ones
+    fn map_extension(ext: &str) -> &str {
+        match ext.to_lowercase().as_str() {
+            // Kotlin -> Java (similar syntax)
+            "kt" | "kts" => "java",
+            // TypeScript -> JavaScript
+            "ts" | "tsx" => "js",
+            // JSX -> JavaScript  
+            "jsx" => "js",
+            // Vue -> HTML
+            "vue" => "html",
+            // Svelte -> HTML
+            "svelte" => "html",
+            // SCSS/SASS -> CSS
+            "scss" | "sass" => "css",
+            // Dockerfile
+            "dockerfile" => "sh",
+            // Makefile
+            "makefile" | "mk" => "sh",
+            // Keep original
+            _ => ext,
+        }
+    }
+
     pub fn highlight_lines(&self, path: &str, lines: &[String]) -> Vec<Vec<(Style, String)>> {
         let extension = Path::new(path)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");
 
+        // Try original extension first, then mapped fallback
         let syntax = self
             .syntax_set
             .find_syntax_by_extension(extension)
+            .or_else(|| {
+                let mapped = Self::map_extension(extension);
+                self.syntax_set.find_syntax_by_extension(mapped)
+            })
             .or_else(|| {
                 self.syntax_set
                     .find_syntax_by_first_line(lines.first().map(|s| s.as_str()).unwrap_or(""))
