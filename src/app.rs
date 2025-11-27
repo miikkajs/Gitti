@@ -1,5 +1,5 @@
 use crossterm::{
-    cursor::{Hide, Show},
+    cursor::{Hide, MoveTo, Show},
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
     execute,
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
@@ -17,6 +17,7 @@ pub struct App {
     scroll_offset: usize,
     git: GitDiff,
     ui: Ui,
+    needs_full_redraw: bool,
 }
 
 impl App {
@@ -32,6 +33,7 @@ impl App {
             scroll_offset: 0,
             git,
             ui,
+            needs_full_redraw: true,
         };
 
         if !app.files.is_empty() {
@@ -54,11 +56,16 @@ impl App {
         let file_path = self.files[self.selected_file].path.clone();
         self.diff_hunks = self.git.load_diff_for_file(&file_path)?;
         self.scroll_offset = 0;
+        self.needs_full_redraw = true;
         Ok(())
     }
 
-    fn draw(&self, stdout: &mut io::Stdout) -> io::Result<()> {
-        execute!(stdout, Clear(ClearType::All))?;
+    fn draw(&mut self, stdout: &mut io::Stdout) -> io::Result<()> {
+        if self.needs_full_redraw {
+            execute!(stdout, Clear(ClearType::All))?;
+            self.needs_full_redraw = false;
+        }
+        execute!(stdout, MoveTo(0, 0))?;
 
         self.ui.draw_file_panel(stdout, &self.files, self.selected_file)?;
         self.ui.draw_separator(stdout)?;
