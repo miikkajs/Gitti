@@ -2,6 +2,7 @@ use std::path::Path;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style, ThemeSet};
 use syntect::parsing::SyntaxSet;
+use two_face::syntax::extra_newlines;
 
 pub struct Highlighter {
     syntax_set: SyntaxSet,
@@ -11,32 +12,8 @@ pub struct Highlighter {
 impl Highlighter {
     pub fn new() -> Self {
         Self {
-            syntax_set: SyntaxSet::load_defaults_newlines(),
+            syntax_set: extra_newlines(),
             theme_set: ThemeSet::load_defaults(),
-        }
-    }
-
-    /// Map unsupported extensions to similar supported ones
-    fn map_extension(ext: &str) -> &str {
-        match ext.to_lowercase().as_str() {
-            // Kotlin -> Java (similar syntax)
-            "kt" | "kts" => "java",
-            // TypeScript -> JavaScript
-            "ts" | "tsx" => "js",
-            // JSX -> JavaScript  
-            "jsx" => "js",
-            // Vue -> HTML
-            "vue" => "html",
-            // Svelte -> HTML
-            "svelte" => "html",
-            // SCSS/SASS -> CSS
-            "scss" | "sass" => "css",
-            // Dockerfile
-            "dockerfile" => "sh",
-            // Makefile
-            "makefile" | "mk" => "sh",
-            // Keep original
-            _ => ext,
         }
     }
 
@@ -46,14 +23,9 @@ impl Highlighter {
             .and_then(|e| e.to_str())
             .unwrap_or("");
 
-        // Try original extension first, then mapped fallback
         let syntax = self
             .syntax_set
             .find_syntax_by_extension(extension)
-            .or_else(|| {
-                let mapped = Self::map_extension(extension);
-                self.syntax_set.find_syntax_by_extension(mapped)
-            })
             .or_else(|| {
                 self.syntax_set
                     .find_syntax_by_first_line(lines.first().map(|s| s.as_str()).unwrap_or(""))

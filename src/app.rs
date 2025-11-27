@@ -1,6 +1,6 @@
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
     execute,
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -124,14 +124,14 @@ impl App {
         let mut stdout = io::stdout();
 
         terminal::enable_raw_mode()?;
-        execute!(stdout, EnterAlternateScreen, Hide)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
 
         loop {
             self.draw(&mut stdout)?;
 
             if event::poll(std::time::Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
-                    match key.code {
+                match event::read()? {
+                    Event::Key(key) => match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                         KeyCode::Up => {
@@ -145,12 +145,18 @@ impl App {
                         KeyCode::PageUp => self.page_up(),
                         KeyCode::PageDown => self.page_down(),
                         _ => {}
-                    }
+                    },
+                    Event::Mouse(mouse) => match mouse.kind {
+                        MouseEventKind::ScrollUp => self.scroll_up(),
+                        MouseEventKind::ScrollDown => self.scroll_down(),
+                        _ => {}
+                    },
+                    _ => {}
                 }
             }
         }
 
-        execute!(stdout, Show, LeaveAlternateScreen)?;
+        execute!(stdout, Show, DisableMouseCapture, LeaveAlternateScreen)?;
         terminal::disable_raw_mode()?;
 
         Ok(())
