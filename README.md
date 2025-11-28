@@ -1,16 +1,18 @@
 # gitti
 
-A fast, lightweight interactive git diff viewer with IntelliJ-style split-pane UI.
+A fast, lightweight interactive git diff viewer with split-pane UI.
 
 ![gitti screenshot](assets/screenshot.png)
 
 ## Features
 
-- 🎨 **IntelliJ-style dark theme** with Darcula colors
+- 🎨 **Dark theme** with Darcula colors
 - 🌈 **Syntax highlighting** - auto-detects language from file extension (Swift, Rust, Python, JS, etc.)
 - 📂 **Split-pane UI** - file list on left, diff on right
+- 🖱️ **Mouse support** - click files, scroll with wheel
+- 🔄 **Live reload** - automatically updates when files change
 - ⌨️ **Keyboard navigation** - select files with arrow keys
-- 📊 **Smart hunks** - shows only changed lines + 5 lines of context
+- 📊 **Smart hunks** - shows only changed lines + context
 - ⚡ **Fast** - uses libgit2 directly, no subprocess
 - 🔧 **Lightweight** - minimal dependencies
 
@@ -37,6 +39,7 @@ gitti -C 10              # 10 lines of context (default: 5)
 | `↑` / `↓` | Select file |
 | `j` / `k` | Scroll diff (3 lines) |
 | `PgUp` / `PgDn` | Scroll diff (page) |
+| `m` | Toggle mouse/select mode |
 | `q` | Quit |
 
 ## License
