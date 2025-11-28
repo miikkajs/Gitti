@@ -5,10 +5,13 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::io::{self, Write};
+use std::time::Instant;
 
 use crate::git::GitDiff;
 use crate::types::{DiffHunk, FileChange};
 use crate::ui::Ui;
+
+const REFRESH_INTERVAL_MS: u128 = 1000;
 
 pub struct App {
     files: Vec<FileChange>,
@@ -19,6 +22,7 @@ pub struct App {
     ui: Ui,
     needs_full_redraw: bool,
     mouse_enabled: bool,
+    last_refresh: Instant,
 }
 
 impl App {
@@ -36,6 +40,7 @@ impl App {
             ui,
             needs_full_redraw: true,
             mouse_enabled: true,
+            last_refresh: Instant::now(),
         };
 
         if !app.files.is_empty() {
@@ -47,6 +52,40 @@ impl App {
 
     pub fn has_files(&self) -> bool {
         !self.files.is_empty()
+    }
+
+    fn refresh_if_needed(&mut self) {
+        if self.last_refresh.elapsed().as_millis() < REFRESH_INTERVAL_MS {
+            return;
+        }
+        self.last_refresh = Instant::now();
+
+        // Reload file list
+        let new_files = match self.git.load_files() {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+
+        // Check if file list changed
+        let files_changed = new_files.len() != self.files.len()
+            || new_files.iter().zip(self.files.iter()).any(|(a, b)| a.path != b.path);
+
+        if files_changed {
+            self.files = new_files;
+            self.selected_file = self.selected_file.min(self.files.len().saturating_sub(1));
+            self.needs_full_redraw = true;
+        }
+
+        // Reload diff for selected file
+        if !self.files.is_empty() {
+            let file_path = self.files[self.selected_file].path.clone();
+            if let Ok(new_hunks) = self.git.load_diff_for_file(&file_path) {
+                if new_hunks != self.diff_hunks {
+                    self.diff_hunks = new_hunks;
+                    self.needs_full_redraw = true;
+                }
+            }
+        }
     }
 
     fn load_diff_for_selected(&mut self) -> Result<(), git2::Error> {
@@ -136,6 +175,7 @@ impl App {
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
 
         loop {
+            self.refresh_if_needed();
             self.draw(&mut stdout)?;
 
             if event::poll(std::time::Duration::from_millis(100))? {
