@@ -8,14 +8,19 @@ use std::io::{self, Write};
 use std::time::Instant;
 
 use crate::git::GitDiff;
-use crate::types::{DiffHunk, FileChange};
+use crate::types::{CommitInfo, DiffHunk, FileChange};
 use crate::ui::Ui;
 
 const REFRESH_INTERVAL_MS: u128 = 1000;
+const MAX_COMMITS: usize = 50;
 
 pub struct App {
+    commits: Vec<CommitInfo>,
+    selected_commit: usize,
+    commit_scroll_offset: usize,
     files: Vec<FileChange>,
     selected_file: usize,
+    file_scroll_offset: usize,
     diff_hunks: Vec<DiffHunk>,
     scroll_offset: usize,
     git: GitDiff,
@@ -28,12 +33,16 @@ pub struct App {
 impl App {
     pub fn new(staged: bool, commit: Option<String>, context_lines: usize) -> Result<Self, git2::Error> {
         let git = GitDiff::new(staged, commit, context_lines)?;
-        let files = git.load_files()?;
+        let commits = git.load_commits(MAX_COMMITS)?;
         let ui = Ui::new();
 
         let mut app = App {
-            files,
+            commits,
+            selected_commit: 0,
+            commit_scroll_offset: 0,
+            files: Vec::new(),
             selected_file: 0,
+            file_scroll_offset: 0,
             diff_hunks: Vec::new(),
             scroll_offset: 0,
             git,
@@ -43,15 +52,35 @@ impl App {
             last_refresh: Instant::now(),
         };
 
-        if !app.files.is_empty() {
-            app.load_diff_for_selected()?;
-        }
+        app.load_files_for_selected_commit()?;
 
         Ok(app)
     }
 
     pub fn has_files(&self) -> bool {
-        !self.files.is_empty()
+        !self.commits.is_empty()
+    }
+
+    fn load_files_for_selected_commit(&mut self) -> Result<(), git2::Error> {
+        if self.commits.is_empty() {
+            self.files.clear();
+            self.diff_hunks.clear();
+            return Ok(());
+        }
+
+        let commit = &self.commits[self.selected_commit];
+        
+        if commit.is_local_changes {
+            self.files = self.git.load_files()?;
+        } else {
+            self.files = self.git.load_files_for_commit(&commit.sha)?;
+        }
+
+        self.selected_file = 0;
+        self.file_scroll_offset = 0;
+        self.load_diff_for_selected()?;
+        self.needs_full_redraw = true;
+        Ok(())
     }
 
     fn refresh_if_needed(&mut self) {
@@ -60,29 +89,45 @@ impl App {
         }
         self.last_refresh = Instant::now();
 
-        // Reload file list
-        let new_files = match self.git.load_files() {
-            Ok(f) => f,
+        // Reload commits
+        let new_commits = match self.git.load_commits(MAX_COMMITS) {
+            Ok(c) => c,
             Err(_) => return,
         };
 
-        // Check if file list changed
-        let files_changed = new_files.len() != self.files.len()
-            || new_files.iter().zip(self.files.iter()).any(|(a, b)| a.path != b.path);
+        let commits_changed = new_commits.len() != self.commits.len()
+            || new_commits.iter().zip(self.commits.iter()).any(|(a, b)| a.sha != b.sha || a.is_local_changes != b.is_local_changes);
 
-        if files_changed {
-            self.files = new_files;
-            self.selected_file = self.selected_file.min(self.files.len().saturating_sub(1));
-            self.needs_full_redraw = true;
+        if commits_changed {
+            self.commits = new_commits;
+            self.selected_commit = self.selected_commit.min(self.commits.len().saturating_sub(1));
+            let _ = self.load_files_for_selected_commit();
+            return;
         }
 
-        // Reload diff for selected file
-        if !self.files.is_empty() {
-            let file_path = self.files[self.selected_file].path.clone();
-            if let Ok(new_hunks) = self.git.load_diff_for_file(&file_path) {
-                if new_hunks != self.diff_hunks {
-                    self.diff_hunks = new_hunks;
-                    self.needs_full_redraw = true;
+        // Only refresh files/diff for local changes
+        if !self.commits.is_empty() && self.commits[self.selected_commit].is_local_changes {
+            let new_files = match self.git.load_files() {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+
+            let files_changed = new_files.len() != self.files.len()
+                || new_files.iter().zip(self.files.iter()).any(|(a, b)| a.path != b.path);
+
+            if files_changed {
+                self.files = new_files;
+                self.selected_file = self.selected_file.min(self.files.len().saturating_sub(1));
+                self.needs_full_redraw = true;
+            }
+
+            if !self.files.is_empty() {
+                let file_path = self.files[self.selected_file].path.clone();
+                if let Ok(new_hunks) = self.git.load_diff_for_file(&file_path) {
+                    if new_hunks != self.diff_hunks {
+                        self.diff_hunks = new_hunks;
+                        self.needs_full_redraw = true;
+                    }
                 }
             }
         }
@@ -95,7 +140,14 @@ impl App {
         }
 
         let file_path = self.files[self.selected_file].path.clone();
-        self.diff_hunks = self.git.load_diff_for_file(&file_path)?;
+        let commit = &self.commits[self.selected_commit];
+
+        if commit.is_local_changes {
+            self.diff_hunks = self.git.load_diff_for_file(&file_path)?;
+        } else {
+            self.diff_hunks = self.git.load_diff_for_commit_file(&commit.sha, &file_path)?;
+        }
+        
         self.scroll_offset = 0;
         self.needs_full_redraw = true;
         Ok(())
@@ -108,7 +160,8 @@ impl App {
         }
         execute!(stdout, MoveTo(0, 0))?;
 
-        self.ui.draw_file_panel(stdout, &self.files, self.selected_file)?;
+        self.ui.draw_commit_panel(stdout, &self.commits, self.selected_commit, self.commit_scroll_offset)?;
+        self.ui.draw_file_panel(stdout, &self.files, self.selected_file, self.file_scroll_offset)?;
         self.ui.draw_separator(stdout)?;
 
         let file_name = if !self.files.is_empty() {
@@ -118,7 +171,6 @@ impl App {
         };
         self.ui.draw_diff_panel(stdout, file_name, &self.diff_hunks, self.scroll_offset)?;
         
-        // Calculate scroll info for status bar
         let total = self.total_diff_lines();
         let visible = (self.ui.term_height - 3) as usize;
         self.ui.draw_status_bar(stdout, self.scroll_offset, total, visible, self.mouse_enabled)?;
@@ -126,9 +178,38 @@ impl App {
         stdout.flush()
     }
 
+    fn select_prev_commit(&mut self) -> Result<(), git2::Error> {
+        if self.selected_commit > 0 {
+            self.selected_commit -= 1;
+            // Scroll up if needed
+            if self.selected_commit < self.commit_scroll_offset {
+                self.commit_scroll_offset = self.selected_commit;
+            }
+            self.load_files_for_selected_commit()?;
+        }
+        Ok(())
+    }
+
+    fn select_next_commit(&mut self) -> Result<(), git2::Error> {
+        if self.selected_commit < self.commits.len().saturating_sub(1) {
+            self.selected_commit += 1;
+            // Scroll down if needed
+            let visible_commits = (self.ui.commit_panel_height - 1) as usize;
+            if self.selected_commit >= self.commit_scroll_offset + visible_commits {
+                self.commit_scroll_offset = self.selected_commit - visible_commits + 1;
+            }
+            self.load_files_for_selected_commit()?;
+        }
+        Ok(())
+    }
+
     fn select_prev_file(&mut self) -> Result<(), git2::Error> {
         if self.selected_file > 0 {
             self.selected_file -= 1;
+            // Scroll up if needed
+            if self.selected_file < self.file_scroll_offset {
+                self.file_scroll_offset = self.selected_file;
+            }
             self.load_diff_for_selected()?;
         }
         Ok(())
@@ -137,6 +218,11 @@ impl App {
     fn select_next_file(&mut self) -> Result<(), git2::Error> {
         if self.selected_file < self.files.len().saturating_sub(1) {
             self.selected_file += 1;
+            // Scroll down if needed
+            let visible_files = (self.ui.term_height - self.ui.commit_panel_height - 2) as usize;
+            if self.selected_file >= self.file_scroll_offset + visible_files {
+                self.file_scroll_offset = self.selected_file - visible_files + 1;
+            }
             self.load_diff_for_selected()?;
         }
         Ok(())
@@ -183,6 +269,12 @@ impl App {
                     Event::Key(key) => match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                        KeyCode::Left => {
+                            let _ = self.select_prev_commit();
+                        }
+                        KeyCode::Right => {
+                            let _ = self.select_next_commit();
+                        }
                         KeyCode::Up => {
                             let _ = self.select_prev_file();
                         }
@@ -207,15 +299,23 @@ impl App {
                         MouseEventKind::ScrollUp => self.scroll_up(),
                         MouseEventKind::ScrollDown => self.scroll_down(),
                         MouseEventKind::Down(_) => {
-                            // Click in file panel to select file
-                            if mouse.column < self.ui.left_panel_width 
-                                && mouse.row >= 1 
-                                && (mouse.row as usize) <= self.files.len() 
-                            {
-                                let clicked_file = (mouse.row - 1) as usize;
-                                if clicked_file != self.selected_file {
-                                    self.selected_file = clicked_file;
-                                    let _ = self.load_diff_for_selected();
+                            let commit_panel_height = self.ui.commit_panel_height;
+                            
+                            if mouse.column < self.ui.left_panel_width {
+                                if mouse.row >= 1 && mouse.row < commit_panel_height {
+                                    // Click in commit panel
+                                    let clicked = (mouse.row - 1) as usize;
+                                    if clicked < self.commits.len() && clicked != self.selected_commit {
+                                        self.selected_commit = clicked;
+                                        let _ = self.load_files_for_selected_commit();
+                                    }
+                                } else if mouse.row >= commit_panel_height + 1 {
+                                    // Click in file panel
+                                    let clicked = (mouse.row - commit_panel_height - 1) as usize;
+                                    if clicked < self.files.len() && clicked != self.selected_file {
+                                        self.selected_file = clicked;
+                                        let _ = self.load_diff_for_selected();
+                                    }
                                 }
                             }
                         }

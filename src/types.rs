@@ -20,3 +20,12 @@ pub struct DiffLine {
 pub struct DiffHunk {
     pub lines: Vec<DiffLine>,
 }
+
+#[derive(Clone, PartialEq)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub short_sha: String,
+    pub message: String,
+    pub author: String,
+    pub is_local_changes: bool,
+}

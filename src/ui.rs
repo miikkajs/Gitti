@@ -3,36 +3,42 @@ use similar::ChangeTag;
 use std::io::{self, Write};
 
 use crate::theme;
-use crate::types::{DiffHunk, DiffLine, FileChange};
+use crate::types::{CommitInfo, DiffHunk, DiffLine, FileChange};
 
 pub struct Ui {
     pub term_width: u16,
     pub term_height: u16,
     pub left_panel_width: u16,
+    pub commit_panel_height: u16,
 }
 
 impl Ui {
     pub fn new() -> Self {
         let (width, height) = crossterm::terminal::size().unwrap_or((120, 40));
         let left_panel_width = (width / 4).max(25).min(50);
+        let commit_panel_height = (height / 4).max(6).min(12);
         Self {
             term_width: width,
             term_height: height,
             left_panel_width,
+            commit_panel_height,
         }
     }
 
-    pub fn draw_file_panel(
+    pub fn draw_commit_panel(
         &self,
         stdout: &mut io::Stdout,
-        files: &[FileChange],
+        commits: &[CommitInfo],
         selected: usize,
+        scroll_offset: usize,
     ) -> io::Result<()> {
         let panel_width = self.left_panel_width as usize;
+        let panel_height = self.commit_panel_height as usize;
+        let visible_count = panel_height - 1;
 
         // Header
         execute!(stdout, MoveTo(0, 0))?;
-        let header = format!(" Changes ({}) ", files.len());
+        let header = " Commits ";
         let header_padded = format!("{:<width$}", header, width = panel_width);
         write!(
             stdout,
@@ -43,13 +49,87 @@ impl Ui {
             theme::RESET
         )?;
 
-        // File list
-        for (i, file) in files.iter().enumerate() {
-            if i + 1 >= self.term_height as usize - 1 {
+        // Commit list (with scrolling)
+        for (row, commit_idx) in (scroll_offset..commits.len()).enumerate() {
+            if row >= visible_count {
                 break;
             }
 
-            execute!(stdout, MoveTo(0, (i + 1) as u16))?;
+            let commit = &commits[commit_idx];
+            execute!(stdout, MoveTo(0, (row + 1) as u16))?;
+
+            let bg = if commit_idx == selected {
+                theme::BG_SELECTED
+            } else {
+                theme::BG_PANEL
+            };
+
+            let (icon, color) = if commit.is_local_changes {
+                ("●", theme::FG_ADDED)
+            } else {
+                ("○", theme::FG_DIM)
+            };
+
+            let max_msg_len = panel_width.saturating_sub(4);
+            let display_msg = if commit.message.len() > max_msg_len {
+                format!("{}…", &commit.message[..max_msg_len.saturating_sub(1)])
+            } else {
+                commit.message.clone()
+            };
+
+            let line = format!(" {} {:<width$}", icon, display_msg, width = max_msg_len);
+            write!(stdout, "{}{}{}{}", bg, color, line, theme::RESET)?;
+        }
+
+        // Fill remaining space
+        let displayed = (commits.len() - scroll_offset).min(visible_count);
+        for i in displayed + 1..panel_height {
+            execute!(stdout, MoveTo(0, i as u16))?;
+            write!(
+                stdout,
+                "{}{:width$}{}",
+                theme::BG_PANEL,
+                "",
+                theme::RESET,
+                width = panel_width
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn draw_file_panel(
+        &self,
+        stdout: &mut io::Stdout,
+        files: &[FileChange],
+        selected: usize,
+        scroll_offset: usize,
+    ) -> io::Result<()> {
+        let panel_width = self.left_panel_width as usize;
+        let start_row = self.commit_panel_height;
+        let available_height = (self.term_height - start_row - 1) as usize;
+
+        // Header
+        execute!(stdout, MoveTo(0, start_row))?;
+        let header = format!(" Files ({}) ", files.len());
+        let header_padded = format!("{:<width$}", header, width = panel_width);
+        write!(
+            stdout,
+            "{}{}{}{}",
+            theme::BG_HEADER,
+            theme::FG_DEFAULT,
+            header_padded,
+            theme::RESET
+        )?;
+
+        // File list (with scrolling)
+        for (row, file_idx) in (scroll_offset..files.len()).enumerate() {
+            if row + 1 >= available_height {
+                break;
+            }
+
+            let file = &files[file_idx];
+            execute!(stdout, MoveTo(0, start_row + (row + 1) as u16))?;
 
             let (icon, color) = match file.status.as_str() {
                 "added" => ("+", theme::FG_ADDED),
@@ -57,7 +137,7 @@ impl Ui {
                 _ => ("~", theme::FG_HEADER),
             };
 
-            let bg = if i == selected {
+            let bg = if file_idx == selected {
                 theme::BG_SELECTED
             } else {
                 theme::BG_PANEL
@@ -75,8 +155,9 @@ impl Ui {
         }
 
         // Fill remaining space
-        for i in files.len() + 1..self.term_height as usize - 1 {
-            execute!(stdout, MoveTo(0, i as u16))?;
+        let displayed = (files.len() - scroll_offset).min(available_height - 1);
+        for i in displayed + 1..available_height {
+            execute!(stdout, MoveTo(0, start_row + i as u16))?;
             write!(
                 stdout,
                 "{}{:width$}{}",
@@ -291,7 +372,7 @@ impl Ui {
         };
         
         let mouse_status = if mouse_enabled { "m:Mouse" } else { "m:Select" };
-        let controls = format!(" ↑↓ Files │ j/k Scroll │ {} │ q Quit ", mouse_status);
+        let controls = format!(" ←→ Commits │ ↑↓ Files │ j/k Scroll │ {} │ q Quit ", mouse_status);
         let right_padding = self.term_width as usize - controls.len() - scroll_info.len();
         let status = format!("{}{:>width$}{}", controls, "", scroll_info, width = right_padding);
         

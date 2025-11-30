@@ -2,7 +2,7 @@ use git2::{DiffOptions, Repository};
 use similar::{ChangeTag, TextDiff};
 
 use crate::highlighter::Highlighter;
-use crate::types::{DiffHunk, DiffLine, FileChange};
+use crate::types::{CommitInfo, DiffHunk, DiffLine, FileChange};
 
 pub struct GitDiff {
     repo: Repository,
@@ -22,6 +22,103 @@ impl GitDiff {
             context_lines,
             highlighter: Highlighter::new(),
         })
+    }
+
+    pub fn load_commits(&self, limit: usize) -> Result<Vec<CommitInfo>, git2::Error> {
+        let mut commits = Vec::new();
+
+        // Check if there are local changes
+        if self.has_local_changes()? {
+            commits.push(CommitInfo {
+                sha: String::new(),
+                short_sha: String::new(),
+                message: "Local Changes".to_string(),
+                author: String::new(),
+                is_local_changes: true,
+            });
+        }
+
+        // Get commit history
+        let mut revwalk = self.repo.revwalk()?;
+        revwalk.push_head()?;
+
+        for oid in revwalk.take(limit) {
+            let oid = oid?;
+            let commit = self.repo.find_commit(oid)?;
+            let message = commit.summary().unwrap_or("").to_string();
+            let author = commit.author().name().unwrap_or("").to_string();
+            let sha = oid.to_string();
+            let short_sha = sha[..7.min(sha.len())].to_string();
+
+            commits.push(CommitInfo {
+                sha,
+                short_sha,
+                message,
+                author,
+                is_local_changes: false,
+            });
+        }
+
+        Ok(commits)
+    }
+
+    fn has_local_changes(&self) -> Result<bool, git2::Error> {
+        let mut diff_opts = DiffOptions::new();
+        diff_opts.include_untracked(true);
+
+        let head_tree = self.repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+
+        // Check staged changes
+        let staged = self.repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut diff_opts))?;
+        if staged.stats()?.files_changed() > 0 {
+            return Ok(true);
+        }
+
+        // Check unstaged changes
+        let unstaged = self.repo.diff_index_to_workdir(None, Some(&mut diff_opts))?;
+        if unstaged.stats()?.files_changed() > 0 {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    pub fn load_files_for_commit(&self, commit_sha: &str) -> Result<Vec<FileChange>, git2::Error> {
+        let mut files = Vec::new();
+        let mut diff_opts = DiffOptions::new();
+
+        let commit = self.repo.revparse_single(commit_sha)?.peel_to_commit()?;
+        let tree = commit.tree()?;
+
+        // Get parent tree (or empty if first commit)
+        let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+
+        let diff = self.repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut diff_opts))?;
+        self.collect_files_from_diff(&diff, &mut files)?;
+
+        Ok(files)
+    }
+
+    pub fn load_diff_for_commit_file(&self, commit_sha: &str, file_path: &str) -> Result<Vec<DiffHunk>, git2::Error> {
+        let commit = self.repo.revparse_single(commit_sha)?.peel_to_commit()?;
+        let tree = commit.tree()?;
+        let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+
+        let old_content = parent_tree
+            .as_ref()
+            .and_then(|t| t.get_path(std::path::Path::new(file_path)).ok())
+            .and_then(|entry| self.repo.find_blob(entry.id()).ok())
+            .map(|blob| String::from_utf8_lossy(blob.content()).to_string())
+            .unwrap_or_default();
+
+        let new_content = tree
+            .get_path(std::path::Path::new(file_path))
+            .ok()
+            .and_then(|entry| self.repo.find_blob(entry.id()).ok())
+            .map(|blob| String::from_utf8_lossy(blob.content()).to_string())
+            .unwrap_or_default();
+
+        self.compute_diff(file_path, &old_content, &new_content)
     }
 
     pub fn load_files(&self) -> Result<Vec<FileChange>, git2::Error> {
@@ -101,6 +198,25 @@ impl GitDiff {
     }
 
     pub fn load_diff_for_file(&self, file_path: &str) -> Result<Vec<DiffHunk>, git2::Error> {
+        let (old_content, new_content) = match self.get_file_contents(file_path) {
+            Ok(contents) => contents,
+            Err(_) => {
+                return Ok(vec![DiffHunk {
+                    lines: vec![DiffLine {
+                        old_num: None,
+                        new_num: Some(1),
+                        tag: ChangeTag::Insert,
+                        content: "[Unable to read file]".to_string(),
+                        highlighted: None,
+                    }],
+                }]);
+            }
+        };
+
+        self.compute_diff(file_path, &old_content, &new_content)
+    }
+
+    fn compute_diff(&self, file_path: &str, old_content: &str, new_content: &str) -> Result<Vec<DiffHunk>, git2::Error> {
         // Skip binary files
         let binary_extensions = [
             "png", "jpg", "jpeg", "gif", "ico", "pdf", "zip", "tar", "gz", "bin", "exe", "dll",
@@ -120,21 +236,6 @@ impl GitDiff {
             }
         }
 
-        let (old_content, new_content) = match self.get_file_contents(file_path) {
-            Ok(contents) => contents,
-            Err(_) => {
-                return Ok(vec![DiffHunk {
-                    lines: vec![DiffLine {
-                        old_num: None,
-                        new_num: Some(1),
-                        tag: ChangeTag::Insert,
-                        content: "[Unable to read file]".to_string(),
-                        highlighted: None,
-                    }],
-                }]);
-            }
-        };
-
         // Check if content looks binary
         if old_content.contains('\0') || new_content.contains('\0') {
             return Ok(vec![DiffHunk {
@@ -148,7 +249,7 @@ impl GitDiff {
             }]);
         }
 
-        let text_diff = TextDiff::from_lines(&old_content, &new_content);
+        let text_diff = TextDiff::from_lines(old_content, new_content);
 
         let line_contents: Vec<String> = text_diff
             .iter_all_changes()
