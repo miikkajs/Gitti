@@ -8,13 +8,24 @@ use std::io::{self, Write};
 use std::time::Instant;
 
 use crate::git::GitDiff;
-use crate::types::{CommitInfo, DiffHunk, FileChange};
+use crate::types::{BranchInfo, CommitInfo, DiffHunk, FileChange};
 use crate::ui::Ui;
 
 const REFRESH_INTERVAL_MS: u128 = 1000;
 const MAX_COMMITS: usize = 50;
 
+#[derive(PartialEq)]
+enum AppMode {
+    Normal,
+    BranchSelect,
+}
+
 pub struct App {
+    mode: AppMode,
+    branches: Vec<BranchInfo>,
+    selected_branch: usize,
+    branch_scroll_offset: usize,
+    current_branch: String,
     commits: Vec<CommitInfo>,
     selected_commit: usize,
     commit_scroll_offset: usize,
@@ -33,10 +44,16 @@ pub struct App {
 impl App {
     pub fn new(staged: bool, commit: Option<String>, context_lines: usize) -> Result<Self, git2::Error> {
         let git = GitDiff::new(staged, commit, context_lines)?;
-        let commits = git.load_commits(MAX_COMMITS)?;
+        let current_branch = git.get_current_branch().unwrap_or("main").to_string();
+        let commits = git.load_commits_for_branch(&current_branch, MAX_COMMITS).unwrap_or_default();
         let ui = Ui::new();
 
         let mut app = App {
+            mode: AppMode::Normal,
+            branches: Vec::new(),
+            selected_branch: 0,
+            branch_scroll_offset: 0,
+            current_branch,
             commits,
             selected_commit: 0,
             commit_scroll_offset: 0,
@@ -84,13 +101,17 @@ impl App {
     }
 
     fn refresh_if_needed(&mut self) {
+        if self.mode != AppMode::Normal {
+            return;
+        }
+        
         if self.last_refresh.elapsed().as_millis() < REFRESH_INTERVAL_MS {
             return;
         }
         self.last_refresh = Instant::now();
 
-        // Reload commits
-        let new_commits = match self.git.load_commits(MAX_COMMITS) {
+        // Reload commits for current branch
+        let new_commits = match self.git.load_commits_for_branch(&self.current_branch, MAX_COMMITS) {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -160,22 +181,54 @@ impl App {
         }
         execute!(stdout, MoveTo(0, 0))?;
 
-        self.ui.draw_commit_panel(stdout, &self.commits, self.selected_commit, self.commit_scroll_offset)?;
-        self.ui.draw_file_panel(stdout, &self.files, self.selected_file, self.file_scroll_offset)?;
-        self.ui.draw_separator(stdout)?;
+        match self.mode {
+            AppMode::Normal => {
+                self.ui.draw_commit_panel(stdout, &self.commits, self.selected_commit, self.commit_scroll_offset, &self.current_branch)?;
+                self.ui.draw_file_panel(stdout, &self.files, self.selected_file, self.file_scroll_offset)?;
+                self.ui.draw_separator(stdout)?;
 
-        let file_name = if !self.files.is_empty() {
-            &self.files[self.selected_file].path
-        } else {
-            "No files"
-        };
-        self.ui.draw_diff_panel(stdout, file_name, &self.diff_hunks, self.scroll_offset)?;
-        
-        let total = self.total_diff_lines();
-        let visible = (self.ui.term_height - 3) as usize;
-        self.ui.draw_status_bar(stdout, self.scroll_offset, total, visible, self.mouse_enabled)?;
+                let file_name = if !self.files.is_empty() {
+                    &self.files[self.selected_file].path
+                } else {
+                    "No files"
+                };
+                self.ui.draw_diff_panel(stdout, file_name, &self.diff_hunks, self.scroll_offset)?;
+                
+                let total = self.total_diff_lines();
+                let visible = (self.ui.term_height - 3) as usize;
+                self.ui.draw_status_bar(stdout, self.scroll_offset, total, visible, self.mouse_enabled, &self.current_branch)?;
+            }
+            AppMode::BranchSelect => {
+                self.ui.draw_branch_panel(stdout, &self.branches, self.selected_branch, self.branch_scroll_offset)?;
+            }
+        }
 
         stdout.flush()
+    }
+
+    fn enter_branch_mode(&mut self) {
+        self.branches = self.git.load_branches().unwrap_or_default();
+        self.selected_branch = self.branches.iter().position(|b| b.is_current).unwrap_or(0);
+        self.branch_scroll_offset = 0;
+        self.mode = AppMode::BranchSelect;
+        self.needs_full_redraw = true;
+    }
+
+    fn select_branch(&mut self) {
+        if let Some(branch) = self.branches.get(self.selected_branch) {
+            self.current_branch = branch.name.clone();
+            self.commits = self.git.load_commits_for_branch(&self.current_branch, MAX_COMMITS).unwrap_or_default();
+            self.selected_commit = 0;
+            self.commit_scroll_offset = 0;
+            let _ = self.load_files_for_selected_commit();
+        }
+        self.mode = AppMode::Normal;
+        self.needs_full_redraw = true;
+    }
+
+    fn cancel_branch_mode(&mut self) {
+        self.mode = AppMode::Normal;
+        self.needs_full_redraw = true;
     }
 
     fn select_prev_commit(&mut self) -> Result<(), git2::Error> {
@@ -266,36 +319,64 @@ impl App {
 
             if event::poll(std::time::Duration::from_millis(100))? {
                 match event::read()? {
-                    Event::Key(key) => match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                        KeyCode::Left => {
-                            let _ = self.select_prev_commit();
-                        }
-                        KeyCode::Right => {
-                            let _ = self.select_next_commit();
-                        }
-                        KeyCode::Up => {
-                            let _ = self.select_prev_file();
-                        }
-                        KeyCode::Down => {
-                            let _ = self.select_next_file();
-                        }
-                        KeyCode::Char('k') => self.scroll_up(),
-                        KeyCode::Char('j') => self.scroll_down(),
-                        KeyCode::PageUp => self.page_up(),
-                        KeyCode::PageDown => self.page_down(),
-                        KeyCode::Char('m') => {
-                            self.mouse_enabled = !self.mouse_enabled;
-                            if self.mouse_enabled {
-                                execute!(stdout, EnableMouseCapture)?;
-                            } else {
-                                execute!(stdout, DisableMouseCapture)?;
+                    Event::Key(key) => {
+                        if self.mode == AppMode::BranchSelect {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('b') => self.cancel_branch_mode(),
+                                KeyCode::Up => {
+                                    if self.selected_branch > 0 {
+                                        self.selected_branch -= 1;
+                                        if self.selected_branch < self.branch_scroll_offset {
+                                            self.branch_scroll_offset = self.selected_branch;
+                                        }
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    if self.selected_branch < self.branches.len().saturating_sub(1) {
+                                        self.selected_branch += 1;
+                                        let visible = (self.ui.term_height - 4) as usize;
+                                        if self.selected_branch >= self.branch_scroll_offset + visible {
+                                            self.branch_scroll_offset = self.selected_branch - visible + 1;
+                                        }
+                                    }
+                                }
+                                KeyCode::Enter => self.select_branch(),
+                                _ => {}
+                            }
+                        } else {
+                            match key.code {
+                                KeyCode::Char('q') => break,
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                                KeyCode::Char('b') => self.enter_branch_mode(),
+                                KeyCode::Left => {
+                                    let _ = self.select_prev_commit();
+                                }
+                                KeyCode::Right => {
+                                    let _ = self.select_next_commit();
+                                }
+                                KeyCode::Up => {
+                                    let _ = self.select_prev_file();
+                                }
+                                KeyCode::Down => {
+                                    let _ = self.select_next_file();
+                                }
+                                KeyCode::Char('k') => self.scroll_up(),
+                                KeyCode::Char('j') => self.scroll_down(),
+                                KeyCode::PageUp => self.page_up(),
+                                KeyCode::PageDown => self.page_down(),
+                                KeyCode::Char('m') => {
+                                    self.mouse_enabled = !self.mouse_enabled;
+                                    if self.mouse_enabled {
+                                        execute!(stdout, EnableMouseCapture)?;
+                                    } else {
+                                        execute!(stdout, DisableMouseCapture)?;
+                                    }
+                                }
+                                _ => {}
                             }
                         }
-                        _ => {}
                     },
-                    Event::Mouse(mouse) if self.mouse_enabled => match mouse.kind {
+                    Event::Mouse(mouse) if self.mouse_enabled && self.mode == AppMode::Normal => match mouse.kind {
                         MouseEventKind::ScrollUp => self.scroll_up(),
                         MouseEventKind::ScrollDown => self.scroll_down(),
                         MouseEventKind::Down(_) => {
@@ -304,14 +385,14 @@ impl App {
                             if mouse.column < self.ui.left_panel_width {
                                 if mouse.row >= 1 && mouse.row < commit_panel_height {
                                     // Click in commit panel
-                                    let clicked = (mouse.row - 1) as usize;
+                                    let clicked = (mouse.row - 1) as usize + self.commit_scroll_offset;
                                     if clicked < self.commits.len() && clicked != self.selected_commit {
                                         self.selected_commit = clicked;
                                         let _ = self.load_files_for_selected_commit();
                                     }
                                 } else if mouse.row >= commit_panel_height + 1 {
                                     // Click in file panel
-                                    let clicked = (mouse.row - commit_panel_height - 1) as usize;
+                                    let clicked = (mouse.row - commit_panel_height - 1) as usize + self.file_scroll_offset;
                                     if clicked < self.files.len() && clicked != self.selected_file {
                                         self.selected_file = clicked;
                                         let _ = self.load_diff_for_selected();

@@ -3,7 +3,7 @@ use similar::ChangeTag;
 use std::io::{self, Write};
 
 use crate::theme;
-use crate::types::{CommitInfo, DiffHunk, DiffLine, FileChange};
+use crate::types::{BranchInfo, CommitInfo, DiffHunk, DiffLine, FileChange};
 
 pub struct Ui {
     pub term_width: u16,
@@ -25,26 +25,108 @@ impl Ui {
         }
     }
 
-    pub fn draw_commit_panel(
+    pub fn draw_branch_panel(
         &self,
         stdout: &mut io::Stdout,
-        commits: &[CommitInfo],
+        branches: &[BranchInfo],
         selected: usize,
         scroll_offset: usize,
     ) -> io::Result<()> {
-        let panel_width = self.left_panel_width as usize;
-        let panel_height = self.commit_panel_height as usize;
-        let visible_count = panel_height - 1;
+        let panel_width = (self.term_width / 2) as usize;
+        let panel_height = (self.term_height - 2) as usize;
+        let start_x = (self.term_width - panel_width as u16) / 2;
+        let start_y = 1u16;
 
         // Header
-        execute!(stdout, MoveTo(0, 0))?;
-        let header = " Commits ";
+        execute!(stdout, MoveTo(start_x, start_y))?;
+        let header = " Select Branch (↑↓ navigate, Enter select, Esc cancel) ";
         let header_padded = format!("{:<width$}", header, width = panel_width);
         write!(
             stdout,
             "{}{}{}{}",
             theme::BG_HEADER,
             theme::FG_DEFAULT,
+            header_padded,
+            theme::RESET
+        )?;
+
+        // Branch list
+        let visible_count = panel_height - 1;
+        for (row, branch_idx) in (scroll_offset..branches.len()).enumerate() {
+            if row >= visible_count {
+                break;
+            }
+
+            let branch = &branches[branch_idx];
+            execute!(stdout, MoveTo(start_x, start_y + (row + 1) as u16))?;
+
+            let bg = if branch_idx == selected {
+                theme::BG_SELECTED
+            } else {
+                theme::BG_PANEL
+            };
+
+            let (icon, color) = if branch.is_current {
+                ("●", theme::FG_ADDED)
+            } else {
+                ("○", theme::FG_DIM)
+            };
+
+            let max_name_len = panel_width.saturating_sub(4);
+            let display_name = if branch.name.len() > max_name_len {
+                format!("{}…", &branch.name[..max_name_len.saturating_sub(1)])
+            } else {
+                branch.name.clone()
+            };
+
+            let line = format!(" {} {:<width$}", icon, display_name, width = max_name_len);
+            write!(stdout, "{}{}{}{}", bg, color, line, theme::RESET)?;
+        }
+
+        // Fill remaining space
+        let displayed = (branches.len() - scroll_offset).min(visible_count);
+        for i in displayed + 1..panel_height {
+            execute!(stdout, MoveTo(start_x, start_y + i as u16))?;
+            write!(
+                stdout,
+                "{}{:width$}{}",
+                theme::BG_PANEL,
+                "",
+                theme::RESET,
+                width = panel_width
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn draw_commit_panel(
+        &self,
+        stdout: &mut io::Stdout,
+        commits: &[CommitInfo],
+        selected: usize,
+        scroll_offset: usize,
+        current_branch: &str,
+    ) -> io::Result<()> {
+        let panel_width = self.left_panel_width as usize;
+        let panel_height = self.commit_panel_height as usize;
+        let visible_count = panel_height - 1;
+
+        // Header with branch name
+        execute!(stdout, MoveTo(0, 0))?;
+        let max_branch_len = panel_width.saturating_sub(4);
+        let branch_display = if current_branch.len() > max_branch_len {
+            format!("{}…", &current_branch[..max_branch_len.saturating_sub(1)])
+        } else {
+            current_branch.to_string()
+        };
+        let header = format!(" {} ", branch_display);
+        let header_padded = format!("{:<width$}", header, width = panel_width);
+        write!(
+            stdout,
+            "{}{}{}{}",
+            theme::BG_HEADER,
+            theme::FG_ADDED,
             header_padded,
             theme::RESET
         )?;
@@ -357,7 +439,7 @@ impl Ui {
         Ok(())
     }
 
-    pub fn draw_status_bar(&self, stdout: &mut io::Stdout, scroll_offset: usize, total_lines: usize, visible_lines: usize, mouse_enabled: bool) -> io::Result<()> {
+    pub fn draw_status_bar(&self, stdout: &mut io::Stdout, scroll_offset: usize, total_lines: usize, visible_lines: usize, mouse_enabled: bool, _current_branch: &str) -> io::Result<()> {
         execute!(stdout, MoveTo(0, self.term_height - 1))?;
         
         let scroll_info = if total_lines > visible_lines {
@@ -372,8 +454,8 @@ impl Ui {
         };
         
         let mouse_status = if mouse_enabled { "m:Mouse" } else { "m:Select" };
-        let controls = format!(" ←→ Commits │ ↑↓ Files │ j/k Scroll │ {} │ q Quit ", mouse_status);
-        let right_padding = self.term_width as usize - controls.len() - scroll_info.len();
+        let controls = format!(" b:Branch │ ←→ Commits │ ↑↓ Files │ j/k Scroll │ {} │ q Quit ", mouse_status);
+        let right_padding = (self.term_width as usize).saturating_sub(controls.len() + scroll_info.len());
         let status = format!("{}{:>width$}{}", controls, "", scroll_info, width = right_padding);
         
         write!(

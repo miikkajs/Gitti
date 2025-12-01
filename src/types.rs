@@ -29,3 +29,10 @@ pub struct CommitInfo {
     pub author: String,
     pub is_local_changes: bool,
 }
+
+#[derive(Clone, PartialEq)]
+pub struct BranchInfo {
+    pub name: String,
+    pub is_current: bool,
+    pub is_remote: bool,
+}

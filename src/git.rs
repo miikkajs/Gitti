@@ -2,7 +2,7 @@ use git2::{DiffOptions, Repository};
 use similar::{ChangeTag, TextDiff};
 
 use crate::highlighter::Highlighter;
-use crate::types::{CommitInfo, DiffHunk, DiffLine, FileChange};
+use crate::types::{BranchInfo, CommitInfo, DiffHunk, DiffLine, FileChange};
 
 pub struct GitDiff {
     repo: Repository,
@@ -10,25 +10,60 @@ pub struct GitDiff {
     commit: Option<String>,
     context_lines: usize,
     highlighter: Highlighter,
+    current_branch: Option<String>,
 }
 
 impl GitDiff {
     pub fn new(staged: bool, commit: Option<String>, context_lines: usize) -> Result<Self, git2::Error> {
         let repo = Repository::discover(".")?;
+        let current_branch = repo.head().ok()
+            .and_then(|h| h.shorthand().map(|s| s.to_string()));
         Ok(Self {
             repo,
             staged,
             commit,
             context_lines,
             highlighter: Highlighter::new(),
+            current_branch,
         })
     }
 
-    pub fn load_commits(&self, limit: usize) -> Result<Vec<CommitInfo>, git2::Error> {
+    pub fn get_current_branch(&self) -> Option<&str> {
+        self.current_branch.as_deref()
+    }
+
+    pub fn load_branches(&self) -> Result<Vec<BranchInfo>, git2::Error> {
+        let mut branches = Vec::new();
+        let current = self.current_branch.as_deref();
+
+        for branch in self.repo.branches(Some(git2::BranchType::Local))? {
+            let (branch, _) = branch?;
+            if let Some(name) = branch.name()? {
+                branches.push(BranchInfo {
+                    name: name.to_string(),
+                    is_current: Some(name) == current,
+                    is_remote: false,
+                });
+            }
+        }
+
+        // Sort with current branch first, then alphabetically
+        branches.sort_by(|a, b| {
+            match (a.is_current, b.is_current) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.cmp(&b.name),
+            }
+        });
+
+        Ok(branches)
+    }
+
+    pub fn load_commits_for_branch(&self, branch_name: &str, limit: usize) -> Result<Vec<CommitInfo>, git2::Error> {
         let mut commits = Vec::new();
 
-        // Check if there are local changes
-        if self.has_local_changes()? {
+        // Only show local changes if on current branch
+        if Some(branch_name) == self.current_branch.as_deref() && self.has_local_changes()? {
             commits.push(CommitInfo {
                 sha: String::new(),
                 short_sha: String::new(),
@@ -38,9 +73,13 @@ impl GitDiff {
             });
         }
 
-        // Get commit history
+        // Get commit history for the branch
+        let branch = self.repo.find_branch(branch_name, git2::BranchType::Local)?;
+        let reference = branch.into_reference();
+        let oid = reference.target().ok_or(git2::Error::from_str("No target"))?;
+
         let mut revwalk = self.repo.revwalk()?;
-        revwalk.push_head()?;
+        revwalk.push(oid)?;
 
         for oid in revwalk.take(limit) {
             let oid = oid?;
